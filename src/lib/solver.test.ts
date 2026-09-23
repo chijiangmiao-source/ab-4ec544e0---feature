@@ -5,8 +5,13 @@ import {
   encodeToken,
   formatBigIntDecimal,
   validatePermutation,
+  validateRisks,
 } from './permutation';
-import { type InversionStep, solve } from './solver';
+import {
+  type InversionStep,
+  solve,
+  solveWeighted,
+} from './solver';
 
 function tokensOf(values: number[]) {
   return values.map(encodeToken);
@@ -242,5 +247,298 @@ describe('边界与展示', () => {
     expect(BigInt(formatBigIntDecimal(r.totalPaths).replace(/,/g, ''))).toBe(
       r.totalPaths,
     );
+  });
+});
+
+/* ==================================================================== *
+ * 风险审计模式
+ * ==================================================================== */
+
+/** 边代价 = 两端切口风险之和（i,j 为 0 基闭区间）。 */
+function edgeWeight(i: number, j: number, risks: number[]): number {
+  return risks[i] + risks[j + 1];
+}
+
+/**
+ * 独立暴力：Dijkstra 求最低代价（分别从初始态与目标态跑一次——倒位自逆、
+ * 边权对称，故到目标的距离 = 从目标出发的距离），再带预算 DFS 枚举全部
+ * 最低代价方案（边代价严格为正，超出预算或无法达成最优即剪枝，自动终止）。
+ */
+function bruteForceWeighted(
+  values: number[],
+  risks: number[],
+): {
+  minCost: number;
+  total: number;
+  minLen: number;
+  maxLen: number;
+  lexicographicMin: InversionStep[];
+  depthCount: Map<string, number>[];
+  rowTotal: number[];
+} {
+  const n = values.length;
+  const start = tokensOf(values);
+  const goalCode = encodeState(tokensOf(Array.from({ length: n }, (_, k) => k + 1)));
+
+  const dijkstra = (sourceCode: number) => {
+    const dist = new Map<number, number>([[sourceCode, 0]]);
+    const queue: number[] = [sourceCode];
+    const settled = new Set<number>();
+    while (queue.length > 0) {
+      let bi = 0;
+      for (let k = 1; k < queue.length; k += 1) {
+        if (dist.get(queue[k])! < dist.get(queue[bi])!) bi = k;
+      }
+      const code = queue.splice(bi, 1)[0];
+      if (settled.has(code)) continue;
+      settled.add(code);
+      const cur: number[] = [];
+      for (let k = 0; k < n; k += 1) cur.push(((code >>> (4 * k)) & 0x0f) - 1);
+      for (let i = 0; i < n; i += 1) {
+        for (let j = i; j < n; j += 1) {
+          const nx = encodeState(applyInversion(cur, i, j));
+          const nd = dist.get(code)! + edgeWeight(i, j, risks);
+          if (dist.get(nx) === undefined || nd < dist.get(nx)!) {
+            dist.set(nx, nd);
+            queue.push(nx);
+          }
+        }
+      }
+    }
+    return dist;
+  };
+
+  const fromStart = dijkstra(encodeState(start));
+  const toGoal = dijkstra(goalCode);
+  const minCost = fromStart.get(goalCode)!;
+
+  let total = 0;
+  let minLen = Infinity;
+  let maxLen = 0;
+  let lexicographicMin: InversionStep[] | null = null;
+  const depthCount: Map<string, number>[] = [];
+
+  const walk = (curTok: number[], spent: number, path: InversionStep[]) => {
+    const code = encodeState(curTok);
+    if (code === goalCode) {
+      total += 1;
+      minLen = Math.min(minLen, path.length);
+      maxLen = Math.max(maxLen, path.length);
+      if (lexicographicMin === null || lexicographicLess(path, lexicographicMin)) {
+        lexicographicMin = path.slice();
+      }
+      // 每条完整方案在其经过的每个深度各贡献一次区间计数。
+      path.forEach((step, d) => {
+        const key = `${step.start}:${step.end}`;
+        depthCount[d].set(key, (depthCount[d].get(key) ?? 0) + 1);
+      });
+      return;
+    }
+    const d = path.length;
+    if (!depthCount[d]) depthCount[d] = new Map();
+    for (let i = 0; i < n; i += 1) {
+      for (let j = i; j < n; j += 1) {
+        const w = edgeWeight(i, j, risks);
+        const nx = applyInversion(curTok, i, j);
+        // 最优边：走到 nx 后剩余代价必须仍恰好达成全局最低代价。
+        if (spent + w + toGoal.get(encodeState(nx))! !== minCost) continue;
+        path.push({ start: i + 1, end: j + 1 });
+        walk(nx, spent + w, path);
+        path.pop();
+      }
+    }
+  };
+  walk(start, 0, []);
+
+  const rowTotal = depthCount.map((m) =>
+    [...m.values()].reduce((a, b) => a + b, 0),
+  );
+
+  return {
+    minCost,
+    total,
+    minLen,
+    maxLen,
+    lexicographicMin: lexicographicMin!,
+    depthCount,
+    rowTotal,
+  };
+}
+
+describe('风险输入校验', () => {
+  it('接受恰好 n+1 个 1..9 正整数', () => {
+    expect(validateRisks('1 2 3 4', 3).risks).toEqual([1, 2, 3, 4]);
+    expect(validateRisks('[9,8,7,6,5]', 4).risks).toEqual([9, 8, 7, 6, 5]);
+  });
+
+  it('数量不符、0、超出 9、非整数合并反馈，且不产出 risks', () => {
+    const r = validateRisks('1, 0, 10, x, 2', 3);
+    expect(r.risks).toBeUndefined();
+    expect(r.errors.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('空输入与负数被拒绝', () => {
+    expect(validateRisks('', 3).risks).toBeUndefined();
+    expect(validateRisks('1 -2 3 4', 3).errors.length).toBeGreaterThan(0);
+  });
+});
+
+describe('风险模式：等权时与普通模式完全一致', () => {
+  const cases: number[][] = [];
+  const perms = (arr: number[]): number[][] =>
+    arr.length <= 1
+      ? [arr]
+      : arr.flatMap((v, i) =>
+          perms(arr.filter((_, k) => k !== i)).map((p) => [v, ...p]),
+        );
+  for (const order of perms([1, 2, 3])) {
+    for (let mask = 0; mask < 1 << 3; mask += 1) {
+      cases.push(order.map((v, k) => (mask & (1 << k) ? -v : v)));
+    }
+  }
+
+  for (const c of cases) {
+    it(`等权一致 ${JSON.stringify(c)}`, () => {
+      const unit = solve(tokensOf(c));
+      const equal = solveWeighted(
+        tokensOf(c),
+        new Array(c.length + 1).fill(1),
+        'risk',
+      );
+      expect(equal.minCost).toBe(2 * unit.distance);
+      expect(equal.distance).toBe(unit.distance);
+      expect(equal.minSteps).toBe(unit.distance);
+      expect(equal.maxSteps).toBe(unit.distance);
+      expect(equal.totalPaths).toBe(unit.totalPaths);
+      expect(equal.canonical.steps).toEqual(unit.canonical.steps);
+      expect(equal.matrix.length).toBe(unit.matrix.length);
+      for (let d = 0; d < unit.matrix.length; d += 1) {
+        expect(equal.matrix[d].rowTotal).toBe(unit.totalPaths);
+        for (let k = 0; k < unit.matrix[d].intervals.length; k += 1) {
+          expect(equal.matrix[d].intervals[k].pathCount).toBe(
+            unit.matrix[d].intervals[k].pathCount,
+          );
+          expect(equal.matrix[d].intervals[k].presence).toBe(
+            unit.matrix[d].intervals[k].presence,
+          );
+        }
+      }
+    });
+  }
+
+  it('等权但非 1（全 5）时方案数/规范/归属同样不变', () => {
+    for (const values of [
+      [-1, -2, -3],
+      [3, 2, 1],
+      [2, 1, -3],
+      [1, -3, -2],
+    ]) {
+      const unit = solve(tokensOf(values));
+      const eq5 = solveWeighted(
+        tokensOf(values),
+        new Array(values.length + 1).fill(5),
+        'risk',
+      );
+      expect(eq5.minCost).toBe(10 * unit.distance);
+      expect(eq5.totalPaths).toBe(unit.totalPaths);
+      expect(eq5.canonical.steps).toEqual(unit.canonical.steps);
+      for (let d = 0; d < unit.matrix.length; d += 1) {
+        for (let k = 0; k < unit.matrix[d].intervals.length; k += 1) {
+          expect(eq5.matrix[d].intervals[k].presence).toBe(
+            unit.matrix[d].intervals[k].presence,
+          );
+        }
+      }
+    }
+  });
+});
+
+describe('风险模式：与暴力枚举交叉验证', () => {
+  const cases: { values: number[]; risks: number[] }[] = [];
+  const perms = (arr: number[]): number[][] =>
+    arr.length <= 1
+      ? [arr]
+      : arr.flatMap((v, i) =>
+          perms(arr.filter((_, k) => k !== i)).map((p) => [v, ...p]),
+        );
+  const all3: number[][] = [];
+  for (const order of perms([1, 2, 3])) {
+    for (let mask = 0; mask < 1 << 3; mask += 1) {
+      all3.push(order.map((v, k) => (mask & (1 << k) ? -v : v)));
+    }
+  }
+  const riskVectors = [
+    [1, 1, 1, 1],
+    [9, 1, 1, 9],
+    [1, 9, 9, 1],
+    [3, 7, 2, 5],
+    [5, 5, 5, 1],
+    [1, 1, 1, 3],
+    [1, 2, 4, 8],
+  ];
+  for (const risks of riskVectors) {
+    for (const values of all3) cases.push({ values, risks });
+  }
+  // n=4 抽样（状态 384 个，暴力仅走最优 DAG，仍可接受）
+  for (const values of [
+    [-1, -2, -3, -4],
+    [4, 3, 2, 1],
+    [2, -1, 4, -3],
+  ]) {
+    cases.push({ values, risks: [9, 1, 9, 1, 9] });
+    cases.push({ values, risks: [1, 9, 1, 9, 1] });
+  }
+
+  for (const { values, risks } of cases) {
+    it(`${JSON.stringify(values)} risks=${JSON.stringify(risks)}`, () => {
+      const r = solveWeighted(tokensOf(values), risks, 'risk');
+      const b = bruteForceWeighted(values, risks);
+
+      expect(r.minCost).toBe(b.minCost);
+      expect(r.totalPaths).toBe(BigInt(b.total));
+      expect(r.minSteps).toBe(b.minLen);
+      expect(r.maxSteps).toBe(b.maxLen);
+      expect(r.canonical.steps).toEqual(b.lexicographicMin);
+      expect(r.matrix.length).toBe(b.maxLen);
+
+      // 规范轨迹必须实际可行且到达全正顺序
+      let cur = tokensOf(values);
+      let cost = 0;
+      for (const s of r.canonical.steps) {
+        cost += edgeWeight(s.start - 1, s.end - 1, risks);
+        cur = applyInversion(cur, s.start - 1, s.end - 1);
+      }
+      expect(signedOf(cur)).toEqual(
+        Array.from({ length: values.length }, (_, k) => k + 1),
+      );
+      expect(cost).toBe(b.minCost);
+
+      for (let d = 0; d < b.maxLen; d += 1) {
+        const layer = r.matrix[d];
+        expect(layer.rowTotal).toBe(BigInt(b.rowTotal[d] ?? 0));
+        let sum = 0n;
+        for (const cell of layer.intervals) {
+          sum += cell.pathCount;
+          const expected = BigInt(b.depthCount[d]?.get(`${cell.start}:${cell.end}`) ?? 0);
+          expect(cell.pathCount).toBe(expected);
+          if (expected === 0n) expect(cell.presence).toBe('none');
+          else if (expected === layer.rowTotal) expect(cell.presence).toBe('all');
+          else expect(cell.presence).toBe('some');
+        }
+        expect(sum).toBe(layer.rowTotal);
+      }
+    });
+  }
+
+  it('非等权时确实可能出现步数不同的同优方案', () => {
+    // 末段切口更贵时，[2,1,-3] 的最低风险方案既有 3 步也有 4 步。
+    const r = solveWeighted(tokensOf([2, 1, -3]), [1, 1, 1, 3], 'risk');
+    expect(r.minSteps).toBe(3);
+    expect(r.maxSteps).toBe(4);
+    // 矩阵行数覆盖最长轨迹；最后一行（深度 3）只有 4 步方案，rowTotal 严格小于总数。
+    expect(r.matrix.length).toBe(4);
+    expect(r.matrix[3].rowTotal < r.totalPaths).toBe(true);
+    expect(r.matrix[3].rowTotal > 0n).toBe(true);
+    expect(r.matrix[0].rowTotal).toBe(r.totalPaths);
   });
 });

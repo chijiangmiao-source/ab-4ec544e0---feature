@@ -70,6 +70,8 @@ export function decodeState(code: number, n: number): Token[] {
 export interface ValidationResult {
   /** 校验通过时给出的 token 排列 */
   tokens?: Token[];
+  /** 输入中解析出的标记数量（不论是否合法），供联动校验（如风险个数）使用 */
+  tokenCount: number;
   /** 一次性合并给出的全部错误（输入始终保留在文本框中，由 UI 负责） */
   errors: string[];
 }
@@ -130,12 +132,65 @@ export function validatePermutation(raw: string): ValidationResult {
   }
 
   if (errors.length === 0) {
-    return { tokens: signed.map(encodeToken), errors };
+    return { tokens: signed.map(encodeToken), tokenCount: n, errors };
   }
-  return { errors };
+  return { tokenCount: n, errors };
 }
 
 /** bigint 方案总数的精确十进制展示，按千位分组但不损失任何精度。 */
 export function formatBigIntDecimal(value: bigint): string {
   return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+export interface RiskValidationResult {
+  /** 校验通过时给出的 n+1 个切口风险 */
+  risks?: number[];
+  /** 一次性合并给出的全部错误（输入文本始终保留在文本框中，由 UI 负责） */
+  errors: string[];
+}
+
+const RISK_INTEGER = /^[+-]?\d+$/;
+
+/**
+ * 风险审计模式的切口风险校验：排列有 n 个标记时存在 n+1 个切口
+ * （r_0 在标记 1 左侧，r_k 在标记 k 与 k+1 之间，r_n 在标记 n 右侧），
+ * 每个风险必须是 1 至 9 的正整数。倒位 [i,j] 的代价 = r_{i-1} + r_j。
+ *
+ * n 未知（排列本身非法）时仍逐项检查格式，尽量合并反馈。
+ */
+export function validateRisks(raw: string, n: number | undefined): RiskValidationResult {
+  const errors: string[] = [];
+  const parts = raw
+    .trim()
+    .replace(/^\[+/, '')
+    .replace(/\]+$/, '')
+    .split(TOKEN_SPLIT)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+
+  if (n !== undefined && parts.length !== n + 1) {
+    errors.push(
+      `切口风险必须恰好为 ${n + 1} 个（n=${n} 时共有 n+1 个切口），当前为 ${parts.length} 个。`,
+    );
+  }
+  if (n === undefined && parts.length === 0) {
+    errors.push('切口风险不能为空：风险审计模式需要为每个切口填写 1 至 9 的正整数风险。');
+  }
+
+  const risks: number[] = [];
+  for (const part of parts) {
+    if (!RISK_INTEGER.test(part)) {
+      errors.push(`“${part}” 不是整数风险。`);
+      continue;
+    }
+    const value = Number(part);
+    if (value < 1 || value > 9) {
+      errors.push(`切口风险 ${value} 非法：只允许 1 至 9 的正整数。`);
+      continue;
+    }
+    risks.push(value);
+  }
+
+  if (errors.length === 0) return { risks, errors };
+  return { errors };
 }

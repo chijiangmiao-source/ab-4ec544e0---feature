@@ -3,12 +3,15 @@ import {
   formatBigIntDecimal,
   tokenToSigned,
   validatePermutation,
+  validateRisks,
   type Token,
 } from './lib/permutation';
 import {
   fromDTO,
   solve,
+  solveWeighted,
   toDTO,
+  type AuditMode,
   type AuditResult,
   type AuditResultDTO,
   type IntervalCell,
@@ -29,7 +32,9 @@ interface SelectedCell {
 }
 
 export function App() {
+  const [mode, setMode] = useState<AuditMode>('unit');
   const [input, setInput] = useState('1,-3,-2,4');
+  const [riskInput, setRiskInput] = useState('');
   const [errors, setErrors] = useState<string[]>([]);
   const [result, setResult] = useState<AuditResult | null>(null);
   const [computing, setComputing] = useState(false);
@@ -39,13 +44,28 @@ export function App() {
   const workerRef = useRef<Worker | null>(null);
 
   const runAudit = useCallback(() => {
-    const { tokens, errors: validationErrors } = validatePermutation(input);
+    const { tokens, tokenCount, errors: permErrors } = validatePermutation(input);
+    // 风险模式还需校验 n+1 个切口风险；排列非法时若标记数量在 3..7 内，
+    // 仍可对风险个数做联动校验（错误合并反馈，文本一律保留）。
+    const riskN =
+      tokens !== undefined
+        ? tokens.length
+        : tokenCount >= 3 && tokenCount <= 7
+          ? tokenCount
+          : undefined;
+    const riskCheck =
+      mode === 'risk'
+        ? validateRisks(riskInput, riskN)
+        : { risks: undefined as number[] | undefined, errors: [] as string[] };
+
     // 无论合法与否，输入文本都原样保留；错误合并为一次反馈。
-    setErrors(validationErrors);
-    if (!tokens) {
+    const allErrors = [...permErrors, ...riskCheck.errors];
+    setErrors(allErrors);
+    if (!tokens || (mode === 'risk' && !riskCheck.risks)) {
       setResult(null);
       return;
     }
+    const risks = mode === 'risk' ? riskCheck.risks! : null;
 
     setComputing(true);
     setResult(null);
@@ -67,26 +87,64 @@ export function App() {
       const worker = workerRef.current;
       worker.onmessage = (event: MessageEvent<AuditResultDTO>) =>
         finish(event.data);
-      const message: AuditRequest = { tokens };
+      const message: AuditRequest = { tokens, risks };
       worker.postMessage(message);
     } catch {
       // Worker 不可用时退回主线程求解（功能不降级，仅可能短暂阻塞）。
-      finish(toDTO(solve(tokens)));
+      finish(
+        toDTO(
+          risks
+            ? solveWeighted(tokens, risks, 'risk')
+            : solve(tokens),
+        ),
+      );
     }
-  }, [input]);
+  }, [input, riskInput, mode]);
 
   return (
     <main className="page">
       <header className="header">
         <h1>带符号标记排列 · 规范倒位审计</h1>
         <p className="subtitle">
-          浏览器内对全部最短方案做精确枚举：最少步数、任意精度方案总数、
-          按每步 <code>[起,止]</code> 下标对字典序选出的规范方案，
-          以及逐深度区间出现矩阵。所有计算均在本机完成，无后端、无网络请求。
+          浏览器内对全部最优方案做精确枚举：普通模式给出最少步数，风险审计模式
+          给出最低累计风险；均含任意精度方案总数、按每步 <code>[起,止]</code>{' '}
+          下标对字典序选出的规范方案，以及逐深度区间出现矩阵。
+          所有计算均在本机完成，无后端、无网络请求。
         </p>
       </header>
 
       <section className="card" aria-label="排列输入">
+        <div className="mode-switch" role="tablist" aria-label="审计模式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'unit'}
+            className={mode === 'unit' ? 'mode mode-active' : 'mode'}
+            onClick={() => {
+              setMode('unit');
+              setResult(null);
+              setErrors([]);
+              setSelected(null);
+            }}
+          >
+            普通模式（按倒位次数）
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'risk'}
+            className={mode === 'risk' ? 'mode mode-active' : 'mode'}
+            onClick={() => {
+              setMode('risk');
+              setResult(null);
+              setErrors([]);
+              setSelected(null);
+            }}
+          >
+            风险审计模式（按切口风险）
+          </button>
+        </div>
+
         <label className="field-label" htmlFor="perm-input">
           带符号排列（3 至 7 个标记，绝对值须恰好为 1 至 n 且互异）
         </label>
@@ -112,6 +170,41 @@ export function App() {
             </button>
           ))}
         </div>
+
+        {mode === 'risk' && (
+          <div className="risk-field">
+            <label className="field-label" htmlFor="risk-input">
+              切口风险（须恰好 n+1 个，即排列两端与相邻标记之间的 n+1 个切口；
+              每个为 1 至 9 的正整数。倒位 [i,j] 的代价 = 切口 r(i-1) 与 r(j) 风险之和）
+            </label>
+            <textarea
+              id="risk-input"
+              className="perm-input"
+              value={riskInput}
+              onChange={(e) => setRiskInput(e.target.value)}
+              rows={2}
+              spellCheck={false}
+              placeholder="例如 n=3 时填写 4 个：1 5 9 1（依次为 r0, r1, r2, r3）"
+            />
+            <div className="examples">
+              <button
+                type="button"
+                className="chip"
+                onClick={() => {
+                  const { tokens, tokenCount } = validatePermutation(input);
+                  const n =
+                    tokens?.length ??
+                    (tokenCount >= 3 && tokenCount <= 7 ? tokenCount : 7);
+                  setRiskInput(new Array(n + 1).fill(1).join(' '));
+                }}
+                title="按当前排列的 n+1 个切口填入等权风险 1"
+              >
+                全部等权（按 n+1 个填 1）
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="actions">
           <button
             type="button"
@@ -157,10 +250,11 @@ function ResultView({
   selected: SelectedCell | null;
   setSelected: (s: SelectedCell | null) => void;
 }) {
-  const { distance, totalPaths, canonical, matrix } = result;
+  const { minCost, distance, maxSteps, minSteps, totalPaths, canonical, matrix } = result;
+  const riskMode = result.mode === 'risk';
 
   const currentStep =
-    activeDepth < distance ? canonical.steps[activeDepth] : null;
+    activeDepth < canonical.steps.length ? canonical.steps[activeDepth] : null;
 
   const jumpToDepth = useCallback(
     (cell: IntervalCell, depth: number) => {
@@ -174,30 +268,43 @@ function ResultView({
     <>
       <section className="card summary" aria-label="审计结论">
         <div className="stat">
-          <div className="stat-value">{distance}</div>
-          <div className="stat-label">最少倒位步数</div>
+          <div className="stat-value">{riskMode ? minCost : distance}</div>
+          <div className="stat-label">
+            {riskMode ? '最低累计风险' : '最少倒位步数'}
+          </div>
         </div>
         <div className="stat">
           <div className="stat-value big" title={totalPaths.toString()}>
             {formatBigIntDecimal(totalPaths)}
           </div>
-          <div className="stat-label">最短方案总数（精确十进制）</div>
+          <div className="stat-label">
+            {riskMode ? '最低风险方案总数（精确十进制）' : '最短方案总数（精确十进制）'}
+          </div>
         </div>
-        <div className="stat">
-          <div className="stat-value">{result.n}</div>
-          <div className="stat-label">标记数 n</div>
-        </div>
+        {riskMode ? (
+          <div className="stat">
+            <div className="stat-value">
+              {minSteps === maxSteps ? minSteps : `${minSteps}–${maxSteps}`}
+            </div>
+            <div className="stat-label">最优方案步数范围（不同方案可不同长）</div>
+          </div>
+        ) : (
+          <div className="stat">
+            <div className="stat-value">{result.n}</div>
+            <div className="stat-label">标记数 n</div>
+          </div>
+        )}
       </section>
 
       <section className="card" aria-label="规范方案轨迹">
         <h2>规范方案轨迹</h2>
         <p className="muted">
-          {distance === 0
+          {canonical.steps.length === 0
             ? '输入已是全正顺序，无需倒位。'
-            : '在全部最短方案中，按每步 (起, 止) 下标对序列的字典序选出。可单步查看：'}
+            : `在全部${riskMode ? '最低风险' : '最短'}方案中，按每步 (起, 止) 下标对序列的字典序选出。该规范轨迹共 ${canonical.steps.length} 步，可单步查看：`}
         </p>
 
-        {distance > 0 && (
+        {canonical.steps.length > 0 && (
           <Trajectory
             result={result}
             activeDepth={activeDepth}
@@ -215,12 +322,22 @@ function ResultView({
             <strong>
               [{currentStep.start}, {currentStep.end}]
             </strong>{' '}
-            执行倒位（反转次序并翻转符号）。
+            执行倒位（反转次序并翻转符号
+            {riskMode
+              ? `，代价 ${result.risks[currentStep.start - 1] + result.risks[currentStep.end]}`
+              : ''}
+            ）。
+          </p>
+        )}
+        {riskMode && activeDepth >= canonical.steps.length && canonical.steps.length > 0 && (
+          <p className="step-hint muted">
+            规范轨迹在第 {canonical.steps.length} 步后已到达全正顺序；
+            矩阵仍展示更长的同优轨迹（最长 {maxSteps} 步）。
           </p>
         )}
       </section>
 
-      {distance > 0 && (
+      {matrix.length > 0 && (
         <section className="card" aria-label="深度区间矩阵">
           <h2>深度 × 区间出现矩阵</h2>
           <Legend selected={selected} canonicalAtDepth={selected ? canonical.steps[selected.depth] ?? null : null} />
@@ -243,10 +360,15 @@ function ResultView({
                     <tr key={layer.depth}>
                       <th scope="row" className="rowhead">
                         第 {layer.depth + 1} 步
+                        <span className="rowtotal" title="仍包含该深度的最优方案数（本行比较全集）">
+                          （全集 {formatBigIntDecimal(layer.rowTotal)}）
+                        </span>
                       </th>
                       {layer.intervals.map((cell) => {
                         const isCanonical =
-                          canon.start === cell.start && canon.end === cell.end;
+                          canon !== undefined &&
+                          canon.start === cell.start &&
+                          canon.end === cell.end;
                         const isSelected =
                           selected?.depth === layer.depth &&
                           selected.start === cell.start &&
@@ -265,7 +387,7 @@ function ResultView({
                                 dimmed ? 'cell-dimmed' : '',
                               ].join(' ')}
                               onClick={() => jumpToDepth(cell, layer.depth)}
-                              title={cellTitle(cell)}
+                              title={cellTitle(cell, layer.rowTotal, riskMode)}
                             >
                               <span className="cell-count">
                                 {formatBigIntDecimal(cell.pathCount)}
@@ -281,8 +403,10 @@ function ResultView({
             </table>
           </div>
           <p className="muted small">
-            每格数字为：在该深度选择该区间的最短方案数量（bigint 精确计数）；
-            每行之和等于方案总数。加粗描边格为规范方案在该深度的选择；
+            每格数字为：在该深度选择该区间的{riskMode ? '最低风险' : '最短'}方案数量
+            （bigint 精确计数）；矩阵行数覆盖最长的同优轨迹（{maxSteps} 步），
+            每行只以<strong>仍包含该深度</strong>的方案为比较全集（行首标注），
+            故每行之和等于该全集数，而非总方案数。加粗描边格为规范方案在该深度的选择；
             点击任意格，轨迹视图联动跳转到对应深度。
           </p>
         </section>
@@ -291,14 +415,15 @@ function ResultView({
   );
 }
 
-function cellTitle(cell: IntervalCell): string {
+function cellTitle(cell: IntervalCell, rowTotal: bigint, riskMode: boolean): string {
+  const kind = riskMode ? '最低风险' : '最短';
   const scope =
     cell.presence === 'all'
-      ? '全部最短方案'
+      ? `仍包含该深度的全部${kind}方案`
       : cell.presence === 'some'
-        ? '部分最短方案'
-        : '任何最短方案中均未出现';
-  return `区间 [${cell.start}, ${cell.end}]：${scope}，出现于 ${cell.pathCount} 个最短方案`;
+        ? `部分${kind}方案`
+        : `任何${kind}方案在该深度均未出现`;
+  return `区间 [${cell.start}, ${cell.end}]：${scope}，出现于 ${cell.pathCount} 个方案（该行全集 ${rowTotal} 个）`;
 }
 
 function Legend({
@@ -311,13 +436,13 @@ function Legend({
   return (
     <div className="legend">
       <span className="legend-item">
-        <i className="swatch swatch-all" /> 全部方案均出现
+        <i className="swatch swatch-all" /> 该行全部方案均出现
       </span>
       <span className="legend-item">
         <i className="swatch swatch-some" /> 仅部分方案出现
       </span>
       <span className="legend-item">
-        <i className="swatch swatch-none" /> 任何最短方案均未出现
+        <i className="swatch swatch-none" /> 该深度任何方案均未出现
       </span>
       <span className="legend-item">
         <i className="swatch swatch-canonical" /> 规范方案选择
@@ -345,11 +470,14 @@ function Trajectory({
   activeDepth: number;
   setActiveDepth: (d: number) => void;
 }) {
-  const { canonical, distance } = result;
+  const { canonical, maxSteps } = result;
   const states = canonical.states;
-  const current = states[activeDepth];
-  const next = activeDepth < distance ? states[activeDepth + 1] : null;
-  const step = activeDepth < distance ? canonical.steps[activeDepth] : null;
+  // 规范轨迹可能短于最长同优轨迹：超出后停留在其终态展示。
+  const stateIndex = Math.min(activeDepth, states.length - 1);
+  const current = states[stateIndex];
+  const ended = activeDepth >= canonical.steps.length;
+  const next = !ended && activeDepth < maxSteps ? states[activeDepth + 1] : null;
+  const step = activeDepth < canonical.steps.length ? canonical.steps[activeDepth] : null;
 
   const positions = new Set<number>();
   if (step) {
@@ -368,19 +496,27 @@ function Trajectory({
           ← 上一步
         </button>
         <span className="stepper-pos">
-          深度 {activeDepth} / {distance}
+          深度 {activeDepth} / {maxSteps}（规范轨迹共 {canonical.steps.length} 步）
         </span>
         <button
           type="button"
-          onClick={() => setActiveDepth(Math.min(distance, activeDepth + 1))}
-          disabled={activeDepth === distance}
+          onClick={() => setActiveDepth(Math.min(maxSteps, activeDepth + 1))}
+          disabled={activeDepth === maxSteps}
         >
           下一步 →
         </button>
       </div>
 
       <div className="states">
-        <StateRow tokens={current} marks={positions} caption={`深度 ${activeDepth}（执行前）`} />
+        <StateRow
+          tokens={current}
+          marks={positions}
+          caption={
+            ended
+              ? `深度 ${activeDepth}（规范轨迹 ${canonical.steps.length} 步已结束，此为其终态；该深度属于更长的同优轨迹）`
+              : `深度 ${activeDepth}（执行前）`
+          }
+        />
         {step && (
           <div className="arrow" aria-hidden="true">
             → [{step.start},{step.end}]
@@ -395,7 +531,7 @@ function Trajectory({
         className="scrub"
         type="range"
         min={0}
-        max={distance}
+        max={maxSteps}
         value={activeDepth}
         onChange={(e) => setActiveDepth(Number(e.target.value))}
         aria-label="选择查看的深度"

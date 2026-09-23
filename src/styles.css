@@ -64,6 +64,42 @@ body {
   margin-bottom: 8px;
 }
 
+.mode-switch {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.mode {
+  flex: 1 1 260px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 9px;
+  padding: 9px 14px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.mode:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.mode-active {
+  background: #22304a;
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.risk-field {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+
 .perm-input {
   width: 100%;
   background: var(--panel-2);
@@ -335,6 +371,14 @@ table.matrix {
   padding-right: 10px;
   white-space: nowrap;
   color: var(--text);
+}
+
+.rowtotal {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .cell {
