@@ -77,15 +77,20 @@ export interface ValidationResult {
 const TOKEN_SPLIT = /[\s,，;；|/]+/;
 const INTEGER = /^[+-]?\d+$/;
 
-export function validatePermutation(raw: string): ValidationResult {
-  const errors: string[] = [];
-  const parts = raw
+/** 与排列输入相同的切词规则：去外层括号、按常见分隔符拆分并丢弃空段。 */
+export function splitRawParts(raw: string): string[] {
+  return raw
     .trim()
     .replace(/^\[+/, '')
     .replace(/\]+$/, '')
     .split(TOKEN_SPLIT)
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
+}
+
+export function validatePermutation(raw: string): ValidationResult {
+  const errors: string[] = [];
+  const parts = splitRawParts(raw);
 
   const n = parts.length;
   if (n < 3 || n > 7) {
@@ -133,6 +138,69 @@ export function validatePermutation(raw: string): ValidationResult {
     return { tokens: signed.map(encodeToken), errors };
   }
   return { errors };
+}
+
+export interface RiskValidationResult {
+  /** 校验通过时给出的 n+1 个切口风险（1 至 9 的正整数） */
+  risks?: number[];
+  /** 一次性合并给出的全部错误（输入文本始终保留在文本框中，由 UI 负责） */
+  errors: string[];
+}
+
+/**
+ * 风险审计模式的切口风险校验：n 个标记对应 n+1 个切口
+ * （切口 k 位于第 k 个标记之前，0 基；末切口位于最后一个标记之后），
+ * 每个风险必须是 1 至 9 的正整数。
+ */
+export function validateRisks(raw: string, n: number): RiskValidationResult {
+  const errors: string[] = [];
+  const parts = splitRawParts(raw);
+  const expected = n + 1;
+
+  if (parts.length !== expected) {
+    errors.push(
+      `风险项数量必须为 ${expected} 个（${n} 个标记对应 ${expected} 个切口），当前为 ${parts.length} 个。`,
+    );
+    // 数量不合法时仍继续逐项检查，尽量合并反馈。
+  }
+
+  const risks: number[] = [];
+  parts.forEach((part, idx) => {
+    if (!INTEGER.test(part)) {
+      errors.push(`第 ${idx + 1} 个切口风险“${part}”不是正整数。`);
+      return;
+    }
+    const value = Number(part);
+    if (value < 1 || value > 9) {
+      errors.push(`第 ${idx + 1} 个切口风险 ${value} 超出范围，只允许 1 至 9 的正整数。`);
+      return;
+    }
+    risks.push(value);
+  });
+
+  if (errors.length === 0) {
+    return { risks, errors };
+  }
+  return { errors };
+}
+
+/**
+ * 排列本身不合法、无法确定切口数 n+1 时，对风险文本仍做不依赖 n 的检查：
+ * 每项必须是 1 至 9 的正整数（数量错误待排列修正后再反馈）。
+ */
+export function riskFormatErrors(raw: string): string[] {
+  const errors: string[] = [];
+  splitRawParts(raw).forEach((part, idx) => {
+    if (!INTEGER.test(part)) {
+      errors.push(`第 ${idx + 1} 个切口风险“${part}”不是正整数。`);
+      return;
+    }
+    const value = Number(part);
+    if (value < 1 || value > 9) {
+      errors.push(`第 ${idx + 1} 个切口风险 ${value} 超出范围，只允许 1 至 9 的正整数。`);
+    }
+  });
+  return errors;
 }
 
 /** bigint 方案总数的精确十进制展示，按千位分组但不损失任何精度。 */
